@@ -318,6 +318,35 @@ def is_feishu_url(value: str) -> bool:
     return bool(FEISHU_URL_PATTERN.match(value.strip()))
 
 
+def ensure_runtime_dependencies(args: argparse.Namespace) -> None:
+    if args.browser_cookies:
+        if browser_cookie3 is None:
+            raise SystemExit(
+                "--browser-cookies requires browser_cookie3. Install it with: pip install browser_cookie3"
+            )
+        if requests is None:
+            raise SystemExit(
+                "--browser-cookies requires requests. Install it with: pip install requests"
+            )
+
+
+def resolve_output_path(source: str, output: str) -> Path:
+    if output:
+        return Path(output).expanduser().resolve()
+
+    fallback_name = "feishu-document.md"
+    docx_match = FEISHU_DOCX_URL_PATTERN.search(source) or FEISHU_WIKI_URL_PATTERN.search(source)
+    if docx_match:
+        fallback_name = f"{docx_match.group(1)}.md"
+    return Path.cwd() / fallback_name
+
+
+def resolve_assets_dir(output_path: Path, assets_dir: str) -> Path:
+    if assets_dir:
+        return Path(assets_dir).expanduser().resolve()
+    return output_path.with_name(f"{output_path.stem}-assets")
+
+
 def default_cookie_domain_for_url(value: str) -> str:
     host = (urllib.parse.urlsplit(value).hostname or "").strip().lower()
     if host.endswith(".feishu.cn") or host == "feishu.cn":
@@ -692,7 +721,7 @@ class RustFSUploadClient:
         try:
             self.upload_with_retries(object_key, payload, guess_content_type(filename))
             return normalize_public_url(self.build_public_url(object_key))
-        except Exception as primary_error:
+        except Exception:
             if not self.rename_on_failure:
                 raise
             fallback_filename = self.build_retry_filename(filename)
@@ -703,7 +732,7 @@ class RustFSUploadClient:
                 guess_content_type(fallback_filename),
             )
             print(
-            f"[feishu->markdown] warning=rustfs_key_fallback from={object_key} to={fallback_key}",
+                f"[feishu->markdown] warning=rustfs_key_fallback from={object_key} to={fallback_key}",
                 file=sys.stderr,
             )
             return normalize_public_url(self.build_public_url(fallback_key))
@@ -2092,18 +2121,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     load_env_file(Path(__file__).resolve().parent.parent / ".env.local")
     args = build_parser().parse_args()
+    ensure_runtime_dependencies(args)
     source = args.input.strip()
     if not is_feishu_url(source):
-        raise SystemExit("This script only accepts a Feishu wiki/docx URL")
+        raise SystemExit("This script only accepts a Feishu wiki/docx/docs URL")
 
-    if args.output:
-        output_path = Path(args.output).expanduser().resolve()
-    else:
-        fallback_name = "feishu-document.md"
-        docx_match = FEISHU_DOCX_URL_PATTERN.search(source) or FEISHU_WIKI_URL_PATTERN.search(source)
-        if docx_match:
-            fallback_name = f"{docx_match.group(1)}.md"
-        output_path = Path.cwd() / fallback_name
+    output_path = resolve_output_path(source, args.output or "")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     upload_client: Optional[Any] = None
@@ -2120,11 +2143,7 @@ def main() -> int:
         effective_directory = "knowledge/column/temp"
 
     if args.no_upload:
-        assets_dir = (
-            Path(args.assets_dir).expanduser().resolve()
-            if args.assets_dir
-            else output_path.with_name(f"{output_path.stem}-assets")
-        )
+        assets_dir = resolve_assets_dir(output_path, args.assets_dir or "")
     elif args.base_url or args.token:
         if not args.base_url:
             raise SystemExit("--base-url or CARE_DOCX_BASE_URL is required when upload is enabled")
@@ -2153,11 +2172,7 @@ def main() -> int:
         )
         assets_dir = None
     else:
-        assets_dir = (
-            Path(args.assets_dir).expanduser().resolve()
-            if args.assets_dir
-            else output_path.with_name(f"{output_path.stem}-assets")
-        )
+        assets_dir = resolve_assets_dir(output_path, args.assets_dir or "")
 
     if args.html_input:
         html_text = Path(args.html_input).expanduser().read_text(encoding="utf-8", errors="ignore")
